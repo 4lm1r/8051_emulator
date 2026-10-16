@@ -38,6 +38,7 @@ TUI::TUI(CPU& c, Memory& m, Debugger& dbg, const std::string& loaded_file)
     : cpu(c), memory(m), debugger(dbg), filename(loaded_file.empty() ? "Built-in Demo" : loaded_file),
       current_view(MainView::Disassembly), menu_selected_idx(0), scroll_offset(0),
       is_command_mode(false), is_running_continuous(false),
+      offset_y(0), offset_x(0),
       win_title(nullptr), win_menu(nullptr), win_main(nullptr), win_status(nullptr), win_cmd(nullptr) {
 
     initscr();
@@ -76,25 +77,16 @@ void TUI::init_colors() {
 }
 
 void TUI::create_windows() {
-    int h = 0, w = 0;
-    getmaxyx(stdscr, h, w);
+    // Center the fixed 80x24 box within current terminal dimensions
+    offset_y = (LINES > UI_HEIGHT) ? (LINES - UI_HEIGHT) / 2 : 0;
+    offset_x = (COLS > UI_WIDTH) ? (COLS - UI_WIDTH) / 2 : 0;
 
-    if (h < 10 || w < 40) {
-        win_main = newwin(h, w, 0, 0);
-        return;
-    }
-
-    // Proportionate menu width: 24 cols for <= 95 cols, 28 cols for wide terminals
-    int menu_w = (w >= 110) ? 28 : 24;
-    int main_w = w - menu_w;
-    int mid_h = h - 3;
-    if (mid_h < 3) mid_h = 3;
-
-    win_title = newwin(1, w, 0, 0);
-    win_menu = newwin(mid_h, menu_w, 1, 0);
-    win_main = newwin(mid_h, main_w, 1, menu_w);
-    win_status = newwin(1, w, h - 2, 0);
-    win_cmd = newwin(1, w, h - 1, 0);
+    // Create fixed-size windows: Total 24 rows, 80 cols
+    win_title  = newwin(1, UI_WIDTH, offset_y, offset_x);
+    win_menu   = newwin(MID_HEIGHT, MENU_WIDTH, offset_y + 1, offset_x);
+    win_main   = newwin(MID_HEIGHT, MAIN_WIDTH, offset_y + 1, offset_x + MENU_WIDTH);
+    win_status = newwin(1, UI_WIDTH, offset_y + 1 + MID_HEIGHT, offset_x);
+    win_cmd    = newwin(1, UI_WIDTH, offset_y + 2 + MID_HEIGHT, offset_x);
 
     keypad(win_cmd, TRUE);
     keypad(win_main, TRUE);
@@ -102,25 +94,50 @@ void TUI::create_windows() {
 }
 
 void TUI::destroy_windows() {
-    if (win_title) { delwin(win_title); win_title = nullptr; }
-    if (win_menu) { delwin(win_menu); win_menu = nullptr; }
-    if (win_main) { delwin(win_main); win_main = nullptr; }
+    if (win_title)  { delwin(win_title);  win_title = nullptr; }
+    if (win_menu)   { delwin(win_menu);   win_menu = nullptr; }
+    if (win_main)   { delwin(win_main);   win_main = nullptr; }
     if (win_status) { delwin(win_status); win_status = nullptr; }
-    if (win_cmd) { delwin(win_cmd); win_cmd = nullptr; }
+    if (win_cmd)    { delwin(win_cmd);    win_cmd = nullptr; }
+}
+
+void TUI::render_backdrop() {
+    werase(stdscr);
+    if (LINES > UI_HEIGHT || COLS > UI_WIDTH) {
+        if (offset_y >= 2) {
+            std::string banner = "Intel 8051 Microprocessor Emulator";
+            int x = std::max(0, (COLS - static_cast<int>(banner.length())) / 2);
+            wattron(stdscr, A_BOLD | COLOR_PAIR(PAIR_HEADER));
+            mvwprintw(stdscr, offset_y - 2, x, "%s", banner.c_str());
+            wattroff(stdscr, A_BOLD | COLOR_PAIR(PAIR_HEADER));
+        }
+        if (offset_y + UI_HEIGHT + 1 < LINES) {
+            std::string hint = "Press 'q' or ':q' to exit | Space:Step | F5:Run";
+            int x = std::max(0, (COLS - static_cast<int>(hint.length())) / 2);
+            mvwprintw(stdscr, offset_y + UI_HEIGHT + 1, x, "%s", hint.c_str());
+        }
+    }
 }
 
 void TUI::resize_all() {
-    struct winsize ws;
-    if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == 0 && ws.ws_col > 0 && ws.ws_row > 0) {
-        resizeterm(ws.ws_row, ws.ws_col);
-    }
+    // 1. Tell curses about new terminal dimensions
+    resizeterm(LINES, COLS);
 
-    destroy_windows();
+    // 2. Recompute centering offsets
+    offset_y = (LINES > UI_HEIGHT) ? (LINES - UI_HEIGHT) / 2 : 0;
+    offset_x = (COLS > UI_WIDTH) ? (COLS - UI_WIDTH) / 2 : 0;
 
-    wclear(stdscr);
+    // 3. Move existing fixed-size windows to new center position (instant, zero memory reallocation)
+    mvwin(win_title,  offset_y, offset_x);
+    mvwin(win_menu,   offset_y + 1, offset_x);
+    mvwin(win_main,   offset_y + 1, offset_x + MENU_WIDTH);
+    mvwin(win_status, offset_y + 1 + MID_HEIGHT, offset_x);
+    mvwin(win_cmd,    offset_y + 2 + MID_HEIGHT, offset_x);
+
+    // 4. Redraw surrounding backdrop and refresh
+    render_backdrop();
     wnoutrefresh(stdscr);
 
-    create_windows();
     render_all();
 }
 
@@ -138,25 +155,22 @@ void TUI::center_disassembly_on_pc() {
 
 void TUI::render_title() {
     if (!win_title) return;
-    int w = getmaxx(win_title);
     werase(win_title);
     wbkgd(win_title, COLOR_PAIR(PAIR_TITLE));
 
     std::string state_str = cpu.is_halted() ? "HALTED" : (is_running_continuous ? "RUNNING" : "PAUSED");
-    std::string title = " 8051 EMULATOR ";
-    std::string info = "[ROM: " + filename + "]  State: " + state_str + "  Cycles: " + std::to_string(cpu.get_cycles()) + " ";
+    std::string title = " 8051 MICROPROCESSOR EMULATOR ";
+    std::string info = "[ROM: " + filename + "]  " + state_str + "  Cycles:" + std::to_string(cpu.get_cycles()) + " ";
 
     mvwprintw(win_title, 0, 0, "%s", title.c_str());
-    if (static_cast<int>(title.length() + info.length()) < w) {
-        mvwprintw(win_title, 0, w - info.length() - 1, "%s", info.c_str());
+    if (static_cast<int>(title.length() + info.length()) < UI_WIDTH) {
+        mvwprintw(win_title, 0, UI_WIDTH - static_cast<int>(info.length()) - 1, "%s", info.c_str());
     }
     wnoutrefresh(win_title);
 }
 
 void TUI::render_menu() {
     if (!win_menu) return;
-    int h, w;
-    getmaxyx(win_menu, h, w);
     werase(win_menu);
     box(win_menu, 0, 0);
 
@@ -171,7 +185,7 @@ void TUI::render_menu() {
 
     const std::vector<MenuOption> options = {
         {"Step (1)",       "F7/Spc"},
-        {"Run/Pause",      "F5/r"},
+        {"Run / Pause",    "F5/r"},
         {"Reset CPU",      "F9"},
         {"Disasm View",    "F1"},
         {"RAM Dump",       "F2"},
@@ -183,7 +197,7 @@ void TUI::render_menu() {
     };
 
     int y = 1;
-    for (size_t i = 0; i < options.size() && y < h - 9; ++i, ++y) {
+    for (size_t i = 0; i < options.size(); ++i, ++y) {
         bool selected = (static_cast<int>(i) == menu_selected_idx);
 
         if (selected) {
@@ -193,52 +207,36 @@ void TUI::render_menu() {
         std::string line = (selected ? ">" : " ") + options[i].label;
         std::string key_str = options[i].key;
 
-        mvwprintw(win_menu, y, 1, "%-*s", w - 2, "");
+        mvwprintw(win_menu, y, 1, "%-*s", MENU_WIDTH - 2, "");
         mvwprintw(win_menu, y, 1, "%s", line.c_str());
-        if (w >= 22) {
-            mvwprintw(win_menu, y, w - 1 - key_str.length(), "%s", key_str.c_str());
-        }
+        mvwprintw(win_menu, y, MENU_WIDTH - 1 - key_str.length(), "%s", key_str.c_str());
 
         if (selected) {
             wattroff(win_menu, COLOR_PAIR(PAIR_MENU_SEL) | A_REVERSE | A_BOLD);
         }
     }
 
-    if (y < h - 6) {
-        mvwhline(win_menu, y, 1, ACS_HLINE, w - 2);
-        wattron(win_menu, A_BOLD | COLOR_PAIR(PAIR_HEADER));
-        mvwprintw(win_menu, y, 2, "[ REGISTERS ]");
-        wattroff(win_menu, A_BOLD | COLOR_PAIR(PAIR_HEADER));
-        y++;
+    // Divider
+    mvwhline(win_menu, y, 1, ACS_HLINE, MENU_WIDTH - 2);
+    wattron(win_menu, A_BOLD | COLOR_PAIR(PAIR_HEADER));
+    mvwprintw(win_menu, y, 2, "[ REGISTERS ]");
+    wattroff(win_menu, A_BOLD | COLOR_PAIR(PAIR_HEADER));
+    y++;
 
-        mvwprintw(win_menu, y++, 2, "PC:0x%04X SP:0x%02X", cpu.get_pc(), cpu.get_sp());
-        mvwprintw(win_menu, y++, 2, "DPTR: 0x%04X", cpu.get_dptr());
-        mvwprintw(win_menu, y++, 2, "ACC:0x%02X  B:0x%02X", cpu.get_acc(), cpu.get_b());
-        mvwprintw(win_menu, y++, 2, "PSW:0x%02X [B%d]", cpu.get_psw(), cpu.get_active_bank());
-        mvwprintw(win_menu, y++, 2, "CY:%d AC:%d OV:%d P:%d", cpu.get_cy(), cpu.get_ac(), cpu.get_ov(), cpu.get_p());
+    mvwprintw(win_menu, y++, 2, "PC: 0x%04X  SP:0x%02X", cpu.get_pc(), cpu.get_sp());
+    mvwprintw(win_menu, y++, 2, "DPTR: 0x%04X", cpu.get_dptr());
+    mvwprintw(win_menu, y++, 2, "ACC: 0x%02X   B:0x%02X", cpu.get_acc(), cpu.get_b());
+    mvwprintw(win_menu, y++, 2, "PSW: 0x%02X   [Bank %d]", cpu.get_psw(), cpu.get_active_bank());
+    mvwprintw(win_menu, y++, 2, "CY:%d AC:%d OV:%d P:%d", cpu.get_cy(), cpu.get_ac(), cpu.get_ov(), cpu.get_p());
 
-        if (y < h - 4) {
-            mvwhline(win_menu, y, 1, ACS_HLINE, w - 2);
-            wattron(win_menu, A_BOLD | COLOR_PAIR(PAIR_HEADER));
-            mvwprintw(win_menu, y, 2, "[ R0-R7 ]");
-            wattroff(win_menu, A_BOLD | COLOR_PAIR(PAIR_HEADER));
-            y++;
+    mvwhline(win_menu, y, 1, ACS_HLINE, MENU_WIDTH - 2);
+    wattron(win_menu, A_BOLD | COLOR_PAIR(PAIR_HEADER));
+    mvwprintw(win_menu, y, 2, "[ R0 - R7 ]");
+    wattroff(win_menu, A_BOLD | COLOR_PAIR(PAIR_HEADER));
+    y++;
 
-            if (h >= 24) {
-                mvwprintw(win_menu, y++, 2, "R0:0x%02X R1:0x%02X", cpu.get_rn(0), cpu.get_rn(1));
-                mvwprintw(win_menu, y++, 2, "R2:0x%02X R3:0x%02X", cpu.get_rn(2), cpu.get_rn(3));
-                if (y < h - 1) mvwprintw(win_menu, y++, 2, "R4:0x%02X R5:0x%02X", cpu.get_rn(4), cpu.get_rn(5));
-                if (y < h - 1) mvwprintw(win_menu, y++, 2, "R6:0x%02X R7:0x%02X", cpu.get_rn(6), cpu.get_rn(7));
-            } else {
-                mvwprintw(win_menu, y++, 2, "R0-3: %02X %02X %02X %02X",
-                          cpu.get_rn(0), cpu.get_rn(1), cpu.get_rn(2), cpu.get_rn(3));
-                if (y < h - 1) {
-                    mvwprintw(win_menu, y++, 2, "R4-7: %02X %02X %02X %02X",
-                              cpu.get_rn(4), cpu.get_rn(5), cpu.get_rn(6), cpu.get_rn(7));
-                }
-            }
-        }
-    }
+    mvwprintw(win_menu, y++, 2, "R0:0x%02X  R1:0x%02X", cpu.get_rn(0), cpu.get_rn(1));
+    mvwprintw(win_menu, y++, 2, "R2:0x%02X  R3:0x%02X", cpu.get_rn(2), cpu.get_rn(3));
 
     wnoutrefresh(win_menu);
 }
@@ -261,19 +259,12 @@ void TUI::render_main() {
 }
 
 void TUI::render_disassembly() {
-    int h, w;
-    getmaxyx(win_main, h, w);
-
     wattron(win_main, A_BOLD | COLOR_PAIR(PAIR_HEADER));
-    if (w >= 45) {
-        mvwprintw(win_main, 0, 2, "[ CODE VIEW ] (PgUp/Dn:Scroll, c:PC)");
-    } else {
-        mvwprintw(win_main, 0, 2, "[ CODE ]");
-    }
+    mvwprintw(win_main, 0, 2, "[ DISASSEMBLY / CODE VIEW ] (PgUp/Dn:Scroll, c:PC)");
     wattroff(win_main, A_BOLD | COLOR_PAIR(PAIR_HEADER));
 
     uint16_t curr_addr = scroll_offset;
-    for (int y = 1; y < h - 1; ++y) {
+    for (int y = 1; y < MID_HEIGHT - 1; ++y) {
         DisassemblyResult res = Disassembler::disassemble(memory, curr_addr);
         bool is_pc = (curr_addr == cpu.get_pc());
         bool is_bp = debugger.has_breakpoint(curr_addr);
@@ -282,7 +273,7 @@ void TUI::render_disassembly() {
             wattron(win_main, COLOR_PAIR(PAIR_PC_LINE) | A_BOLD);
         }
 
-        mvwprintw(win_main, y, 1, "%-*s", w - 2, "");
+        mvwprintw(win_main, y, 1, "%-*s", MAIN_WIDTH - 2, "");
 
         if (is_bp) {
             wattron(win_main, COLOR_PAIR(PAIR_BP) | A_BOLD);
@@ -292,16 +283,14 @@ void TUI::render_disassembly() {
             mvwprintw(win_main, y, 1, "   ");
         }
 
-        mvwprintw(win_main, y, 4, "%s %04X: %-8s %-5s %-12s",
+        mvwprintw(win_main, y, 4, "%s %04X: %-8s %-5s %-15s",
                   (is_pc ? "=>" : "  "),
                   res.address,
                   res.bytes_hex.c_str(),
                   res.mnemonic.c_str(),
                   res.operands.c_str());
 
-        if (w >= 50) {
-            mvwprintw(win_main, y, w - 10, "[%d cyc]", res.cycles);
-        }
+        mvwprintw(win_main, y, MAIN_WIDTH - 10, "[%d cyc]", res.cycles);
 
         if (is_pc) {
             wattroff(win_main, COLOR_PAIR(PAIR_PC_LINE) | A_BOLD);
@@ -312,56 +301,36 @@ void TUI::render_disassembly() {
 }
 
 void TUI::render_internal_ram() {
-    int h, w;
-    getmaxyx(win_main, h, w);
-
     wattron(win_main, A_BOLD | COLOR_PAIR(PAIR_HEADER));
-    mvwprintw(win_main, 0, 2, "[ INTERNAL RAM ]");
+    mvwprintw(win_main, 0, 2, "[ INTERNAL RAM (0x00-0x7F / 0x80-0xFF) ]");
     wattroff(win_main, A_BOLD | COLOR_PAIR(PAIR_HEADER));
 
-    bool show_ascii = (w >= 74);
-
     wattron(win_main, COLOR_PAIR(PAIR_HEADER));
-    if (show_ascii) {
-        mvwprintw(win_main, 1, 2, "Addr 00 01 02 03 04 05 06 07  08 09 0A 0B 0C 0D 0E 0F  ASCII");
-    } else {
-        mvwprintw(win_main, 1, 2, "Addr 00 01 02 03 04 05 06 07  08 09 0A 0B 0C 0D 0E 0F");
-    }
+    mvwprintw(win_main, 1, 2, "Addr 00 01 02 03 04 05 06 07  08 09 0A 0B 0C 0D 0E 0F");
     wattroff(win_main, COLOR_PAIR(PAIR_HEADER));
 
-    for (int row = 0; row < 16 && (2 + row) < h - 1; ++row) {
+    for (int row = 0; row < 16 && (2 + row) < MID_HEIGHT - 1; ++row) {
         int y = 2 + row;
         uint8_t base_addr = row * 16;
 
         mvwprintw(win_main, y, 2, "%02X: ", base_addr);
 
-        std::string ascii_str;
         for (int col = 0; col < 16; ++col) {
             uint8_t addr = base_addr + col;
             uint8_t val = (addr < 0x80) ? memory.read_direct(addr) : memory.read_indirect(addr);
 
             int x = 6 + (col * 3) + (col >= 8 ? 1 : 0);
-            if (x + 2 >= w) break;
 
             if (val != 0) wattron(win_main, COLOR_PAIR(PAIR_NONZERO) | A_BOLD);
             mvwprintw(win_main, y, x, "%02X", val);
             if (val != 0) wattroff(win_main, COLOR_PAIR(PAIR_NONZERO) | A_BOLD);
-
-            ascii_str += (val >= 32 && val <= 126) ? static_cast<char>(val) : '.';
-        }
-
-        if (show_ascii && 56 + 18 < w) {
-            mvwprintw(win_main, y, 56, "|%s|", ascii_str.c_str());
         }
     }
 }
 
 void TUI::render_sfr() {
-    int h, w;
-    getmaxyx(win_main, h, w);
-
     wattron(win_main, A_BOLD | COLOR_PAIR(PAIR_HEADER));
-    mvwprintw(win_main, 0, 2, "[ SFR REGISTERS ]");
+    mvwprintw(win_main, 0, 2, "[ SPECIAL FUNCTION REGISTERS ]");
     wattroff(win_main, A_BOLD | COLOR_PAIR(PAIR_HEADER));
 
     struct SfrInfo {
@@ -379,97 +348,60 @@ void TUI::render_sfr() {
         {sfr::PSW,  "PSW"},  {sfr::ACC,  "ACC"},  {sfr::B,    "B"}
     };
 
-    bool two_cols = (w >= 54);
+    wattron(win_main, COLOR_PAIR(PAIR_HEADER));
+    mvwprintw(win_main, 1, 2, "Addr Name Hex  Binary     Addr Name Hex  Binary");
+    wattroff(win_main, COLOR_PAIR(PAIR_HEADER));
 
-    if (two_cols) {
-        wattron(win_main, COLOR_PAIR(PAIR_HEADER));
-        mvwprintw(win_main, 1, 2, "Addr Name Hex  Binary     Addr Name Hex  Binary");
-        wattroff(win_main, COLOR_PAIR(PAIR_HEADER));
+    size_t half = (sfrs.size() + 1) / 2;
+    for (size_t i = 0; i < half; ++i) {
+        int y = 2 + i;
+        if (y >= MID_HEIGHT - 1) break;
 
-        size_t half = (sfrs.size() + 1) / 2;
-        for (size_t i = 0; i < half; ++i) {
-            int y = 2 + i;
-            if (y >= h - 1) break;
+        const auto& s1 = sfrs[i];
+        uint8_t v1 = memory.read_direct(s1.addr);
+        mvwprintw(win_main, y, 2, "0x%02X %-4s 0x%02X %s",
+                  s1.addr, s1.name.c_str(), v1, to_bin8(v1).c_str());
 
-            const auto& s1 = sfrs[i];
-            uint8_t v1 = memory.read_direct(s1.addr);
-            mvwprintw(win_main, y, 2, "0x%02X %-4s 0x%02X %s",
-                      s1.addr, s1.name.c_str(), v1, to_bin8(v1).c_str());
-
-            if (i + half < sfrs.size()) {
-                const auto& s2 = sfrs[i + half];
-                uint8_t v2 = memory.read_direct(s2.addr);
-                mvwprintw(win_main, y, 28, "0x%02X %-4s 0x%02X %s",
-                          s2.addr, s2.name.c_str(), v2, to_bin8(v2).c_str());
-            }
-        }
-    } else {
-        wattron(win_main, COLOR_PAIR(PAIR_HEADER));
-        mvwprintw(win_main, 1, 2, "Addr Name  Hex  Binary");
-        wattroff(win_main, COLOR_PAIR(PAIR_HEADER));
-
-        for (size_t i = 0; i < sfrs.size(); ++i) {
-            int y = 2 + i;
-            if (y >= h - 1) break;
-            const auto& item = sfrs[i];
-            uint8_t val = memory.read_direct(item.addr);
-            mvwprintw(win_main, y, 2, "0x%02X %-5s 0x%02X %s",
-                      item.addr, item.name.c_str(), val, to_bin8(val).c_str());
+        if (i + half < sfrs.size()) {
+            const auto& s2 = sfrs[i + half];
+            uint8_t v2 = memory.read_direct(s2.addr);
+            mvwprintw(win_main, y, 28, "0x%02X %-4s 0x%02X %s",
+                      s2.addr, s2.name.c_str(), v2, to_bin8(v2).c_str());
         }
     }
 }
 
 void TUI::render_external_ram() {
-    int h, w;
-    getmaxyx(win_main, h, w);
-
     wattron(win_main, A_BOLD | COLOR_PAIR(PAIR_HEADER));
-    mvwprintw(win_main, 0, 2, "[ EXTERNAL RAM (XDATA) ]");
+    mvwprintw(win_main, 0, 2, "[ EXTERNAL RAM (XDATA) - PgUp/PgDn ]");
     wattroff(win_main, A_BOLD | COLOR_PAIR(PAIR_HEADER));
 
-    bool show_ascii = (w >= 74);
-
     wattron(win_main, COLOR_PAIR(PAIR_HEADER));
-    if (show_ascii) {
-        mvwprintw(win_main, 1, 2, "Addr 00 01 02 03 04 05 06 07  08 09 0A 0B 0C 0D 0E 0F  ASCII");
-    } else {
-        mvwprintw(win_main, 1, 2, "Addr 00 01 02 03 04 05 06 07  08 09 0A 0B 0C 0D 0E 0F");
-    }
+    mvwprintw(win_main, 1, 2, "Addr 00 01 02 03 04 05 06 07  08 09 0A 0B 0C 0D 0E 0F");
     wattroff(win_main, COLOR_PAIR(PAIR_HEADER));
 
-    for (int row = 0; row < h - 3; ++row) {
+    for (int row = 0; row < MID_HEIGHT - 3; ++row) {
         int y = 2 + row;
         uint32_t base = scroll_offset + (row * 16);
         if (base >= 65536) break;
 
         mvwprintw(win_main, y, 2, "%04X:", base);
 
-        std::string ascii_str;
         for (int col = 0; col < 16; ++col) {
             uint32_t addr = base + col;
             uint8_t val = (addr < 65536) ? memory.read_xdata(addr) : 0;
             int x = 8 + (col * 3) + (col >= 8 ? 1 : 0);
-            if (x + 2 >= w) break;
 
             if (val != 0) wattron(win_main, COLOR_PAIR(PAIR_NONZERO) | A_BOLD);
             mvwprintw(win_main, y, x, "%02X", val);
             if (val != 0) wattroff(win_main, COLOR_PAIR(PAIR_NONZERO) | A_BOLD);
-
-            ascii_str += (val >= 32 && val <= 126) ? static_cast<char>(val) : '.';
-        }
-
-        if (show_ascii && 58 + 18 < w) {
-            mvwprintw(win_main, y, 58, "|%s|", ascii_str.c_str());
         }
     }
 }
 
 void TUI::render_breakpoints() {
-    int h, w;
-    getmaxyx(win_main, h, w);
-
     wattron(win_main, A_BOLD | COLOR_PAIR(PAIR_HEADER));
-    mvwprintw(win_main, 0, 2, "[ BREAKPOINTS ]");
+    mvwprintw(win_main, 0, 2, "[ ACTIVE BREAKPOINTS ]");
     wattroff(win_main, A_BOLD | COLOR_PAIR(PAIR_HEADER));
 
     const auto& bps = debugger.get_breakpoints();
@@ -481,35 +413,32 @@ void TUI::render_breakpoints() {
 
     int y = 2;
     for (uint16_t bp : bps) {
-        if (y >= h - 1) break;
+        if (y >= MID_HEIGHT - 1) break;
         DisassemblyResult res = Disassembler::disassemble(memory, bp);
         wattron(win_main, COLOR_PAIR(PAIR_BP) | A_BOLD);
         mvwprintw(win_main, y, 3, "[*]");
         wattroff(win_main, COLOR_PAIR(PAIR_BP) | A_BOLD);
 
-        mvwprintw(win_main, y, 7, "0x%04X: %-8s %-5s %-12s",
+        mvwprintw(win_main, y, 7, "0x%04X: %-8s %-5s %-15s",
                   bp, res.bytes_hex.c_str(), res.mnemonic.c_str(), res.operands.c_str());
         y++;
     }
 }
 
 void TUI::render_log() {
-    int h, w;
-    getmaxyx(win_main, h, w);
-
     wattron(win_main, A_BOLD | COLOR_PAIR(PAIR_HEADER));
-    mvwprintw(win_main, 0, 2, "[ LOG & MESSAGES ]");
+    mvwprintw(win_main, 0, 2, "[ EXECUTION LOG & MESSAGES ]");
     wattroff(win_main, A_BOLD | COLOR_PAIR(PAIR_HEADER));
 
-    int max_lines = h - 2;
+    int max_lines = MID_HEIGHT - 2;
     int start_idx = static_cast<int>(message_log.size()) - max_lines;
     if (start_idx < 0) start_idx = 0;
 
     int y = 1;
-    for (size_t i = start_idx; i < message_log.size() && y < h - 1; ++i, ++y) {
+    for (size_t i = start_idx; i < message_log.size() && y < MID_HEIGHT - 1; ++i, ++y) {
         std::string line = message_log[i];
-        if (static_cast<int>(line.length()) > w - 4) {
-            line = line.substr(0, w - 4);
+        if (static_cast<int>(line.length()) > MAIN_WIDTH - 4) {
+            line = line.substr(0, MAIN_WIDTH - 4);
         }
         mvwprintw(win_main, y, 2, "%s", line.c_str());
     }
@@ -517,7 +446,6 @@ void TUI::render_log() {
 
 void TUI::render_status() {
     if (!win_status) return;
-    int w = getmaxx(win_status);
     werase(win_status);
     wbkgd(win_status, COLOR_PAIR(PAIR_STATUS));
 
@@ -526,8 +454,8 @@ void TUI::render_status() {
                        " | Next: " + cur.mnemonic + " " + cur.operands +
                        " | " + status_message;
 
-    if (static_cast<int>(line.length()) > w - 2) {
-        line = line.substr(0, w - 2);
+    if (static_cast<int>(line.length()) > UI_WIDTH - 2) {
+        line = line.substr(0, UI_WIDTH - 2);
     }
     mvwprintw(win_status, 0, 0, "%s", line.c_str());
     wnoutrefresh(win_status);
@@ -535,50 +463,27 @@ void TUI::render_status() {
 
 void TUI::render_cmd() {
     if (!win_cmd) return;
-    int w = getmaxx(win_cmd);
     werase(win_cmd);
 
     if (is_command_mode) {
         curs_set(1);
         wattron(win_cmd, COLOR_PAIR(PAIR_CMD) | A_BOLD);
         std::string disp = ":" + command_buffer;
-        if (static_cast<int>(disp.length()) > w - 2) {
-            disp = disp.substr(disp.length() - (w - 2));
+        if (static_cast<int>(disp.length()) > UI_WIDTH - 2) {
+            disp = disp.substr(disp.length() - (UI_WIDTH - 2));
         }
         mvwprintw(win_cmd, 0, 0, "%s", disp.c_str());
         wattroff(win_cmd, COLOR_PAIR(PAIR_CMD) | A_BOLD);
-        wmove(win_cmd, 0, std::min(w - 2, static_cast<int>(disp.length())));
+        wmove(win_cmd, 0, std::min(UI_WIDTH - 2, static_cast<int>(disp.length())));
     } else {
         curs_set(0);
-        std::string tip;
-        if (w >= 75) {
-            tip = " [CMD] Press ':' for command, Space:Step, F5:Run, F1-F4:Views, q:Quit";
-        } else {
-            tip = " [CMD] ':' Cmd | Space:Step | F5:Run | q:Quit";
-        }
-        if (static_cast<int>(tip.length()) > w - 2) {
-            tip = tip.substr(0, w - 2);
-        }
-        mvwprintw(win_cmd, 0, 0, "%s", tip.c_str());
+        std::string tip = " [CMD] Press ':' for command | Space:Step | F5:Run | F1-F4:Views | q:Quit";
+        mvwprintw(win_cmd, 0, 0, "%.*s", UI_WIDTH - 2, tip.c_str());
     }
     wnoutrefresh(win_cmd);
 }
 
 void TUI::render_all() {
-    if (!win_title) {
-        if (win_main) {
-            int h, w;
-            getmaxyx(win_main, h, w);
-            werase(win_main);
-            box(win_main, 0, 0);
-            std::string msg = "Terminal: " + std::to_string(w) + "x" + std::to_string(h) + " (min 40x10)";
-            mvwprintw(win_main, std::max(1, h / 2), std::max(1, (w - static_cast<int>(msg.length())) / 2), "%s", msg.c_str());
-            wnoutrefresh(win_main);
-            doupdate();
-        }
-        return;
-    }
-
     render_title();
     render_menu();
     render_main();
@@ -849,6 +754,9 @@ void TUI::handle_input(int ch, bool& should_exit) {
 void TUI::run() {
     bool should_exit = false;
 
+    // Initial render with backdrop
+    render_backdrop();
+    wnoutrefresh(stdscr);
     render_all();
 
     while (!should_exit) {

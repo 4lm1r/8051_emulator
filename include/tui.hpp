@@ -18,6 +18,12 @@ enum class MainView {
 
 class TUI {
 public:
+    static constexpr int UI_WIDTH = 80;
+    static constexpr int UI_HEIGHT = 24;
+    static constexpr int MENU_WIDTH = 24;
+    static constexpr int MAIN_WIDTH = UI_WIDTH - MENU_WIDTH; // 56
+    static constexpr int MID_HEIGHT = UI_HEIGHT - 3;         // 21
+
     TUI(CPU& cpu, Memory& mem, Debugger& dbg, const std::string& loaded_filename = "");
     ~TUI();
 
@@ -43,6 +49,10 @@ private:
     std::deque<std::string> message_log;
     std::string status_message;
 
+    // Center offsets
+    int offset_y;
+    int offset_x;
+
     // Window pointers
     WINDOW* win_title;
     WINDOW* win_menu;
@@ -55,6 +65,7 @@ private:
     void create_windows();
     void destroy_windows();
     void resize_all();
+    void render_backdrop();
 
     // Render methods
     void render_all();
