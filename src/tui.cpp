@@ -4,6 +4,8 @@
 #include <sstream>
 #include <iomanip>
 #include <algorithm>
+#include <sys/ioctl.h>
+#include <unistd.h>
 
 enum ColorPairs {
     PAIR_DEFAULT = 0,
@@ -48,7 +50,7 @@ TUI::TUI(CPU& c, Memory& m, Debugger& dbg, const std::string& loaded_file)
     create_windows();
 
     center_disassembly_on_pc();
-    log_message("8051 Emulator started. Press Space/F7 to step, F5 to run, ':' for command.");
+    log_message("8051 Emulator ready. Space/F7:Step | F5:Run | F1-F4:Views | ':' Command");
 }
 
 TUI::~TUI() {
@@ -77,17 +79,16 @@ void TUI::create_windows() {
     int h = 0, w = 0;
     getmaxyx(stdscr, h, w);
 
-    if (h < 12 || w < 50) {
-        // Fallback for very small terminal size
+    if (h < 10 || w < 40) {
         win_main = newwin(h, w, 0, 0);
         return;
     }
 
-    // Proportional & responsive menu width:
-    int menu_w = (w >= 120) ? 30 : ((w >= 90) ? 26 : 24);
+    // Proportionate menu width: 24 cols for <= 95 cols, 28 cols for wide terminals
+    int menu_w = (w >= 110) ? 28 : 24;
     int main_w = w - menu_w;
     int mid_h = h - 3;
-    if (mid_h < 4) mid_h = 4;
+    if (mid_h < 3) mid_h = 3;
 
     win_title = newwin(1, w, 0, 0);
     win_menu = newwin(mid_h, menu_w, 1, 0);
@@ -95,9 +96,9 @@ void TUI::create_windows() {
     win_status = newwin(1, w, h - 2, 0);
     win_cmd = newwin(1, w, h - 1, 0);
 
+    keypad(win_cmd, TRUE);
     keypad(win_main, TRUE);
     keypad(win_menu, TRUE);
-    keypad(win_cmd, TRUE);
 }
 
 void TUI::destroy_windows() {
@@ -109,18 +110,17 @@ void TUI::destroy_windows() {
 }
 
 void TUI::resize_all() {
-    // 1. Tell curses to update internal window size structures to new geometry
-    resizeterm(LINES, COLS);
+    struct winsize ws;
+    if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == 0 && ws.ws_col > 0 && ws.ws_row > 0) {
+        resizeterm(ws.ws_row, ws.ws_col);
+    }
 
-    // 2. Clear stdscr to wipe old borders and text from the screen
-    wclear(stdscr);
-    wrefresh(stdscr);
-
-    // 3. Recreate windows with new dimensions
     destroy_windows();
-    create_windows();
 
-    // 4. Redraw everything cleanly
+    wclear(stdscr);
+    wnoutrefresh(stdscr);
+
+    create_windows();
     render_all();
 }
 
@@ -133,7 +133,7 @@ void TUI::log_message(const std::string& msg) {
 }
 
 void TUI::center_disassembly_on_pc() {
-    scroll_offset = (cpu.get_pc() >= 5) ? (cpu.get_pc() - 5) : 0;
+    scroll_offset = (cpu.get_pc() >= 4) ? (cpu.get_pc() - 4) : 0;
 }
 
 void TUI::render_title() {
@@ -143,14 +143,14 @@ void TUI::render_title() {
     wbkgd(win_title, COLOR_PAIR(PAIR_TITLE));
 
     std::string state_str = cpu.is_halted() ? "HALTED" : (is_running_continuous ? "RUNNING" : "PAUSED");
-    std::string title = " 8051 MICROPROCESSOR EMULATOR ";
+    std::string title = " 8051 EMULATOR ";
     std::string info = "[ROM: " + filename + "]  State: " + state_str + "  Cycles: " + std::to_string(cpu.get_cycles()) + " ";
 
     mvwprintw(win_title, 0, 0, "%s", title.c_str());
-    if (static_cast<int>(info.length()) < w) {
-        mvwprintw(win_title, 0, w - info.length(), "%s", info.c_str());
+    if (static_cast<int>(title.length() + info.length()) < w) {
+        mvwprintw(win_title, 0, w - info.length() - 1, "%s", info.c_str());
     }
-    wrefresh(win_title);
+    wnoutrefresh(win_title);
 }
 
 void TUI::render_menu() {
@@ -160,9 +160,8 @@ void TUI::render_menu() {
     werase(win_menu);
     box(win_menu, 0, 0);
 
-    // Title
     wattron(win_menu, A_BOLD | COLOR_PAIR(PAIR_HEADER));
-    mvwprintw(win_menu, 0, 2, "[ MENU & ACTIONS ]");
+    mvwprintw(win_menu, 0, 2, "[ MENU ]");
     wattroff(win_menu, A_BOLD | COLOR_PAIR(PAIR_HEADER));
 
     struct MenuOption {
@@ -171,32 +170,32 @@ void TUI::render_menu() {
     };
 
     const std::vector<MenuOption> options = {
-        {"Step (1 inst)",  "F7/Spc"},
-        {"Run / Pause",    "F5/r"},
+        {"Step (1)",       "F7/Spc"},
+        {"Run/Pause",      "F5/r"},
         {"Reset CPU",      "F9"},
-        {"Disassembly",    "F1"},
-        {"Internal RAM",   "F2"},
-        {"SFR Registers",  "F3"},
-        {"External XDATA", "F4"},
+        {"Disasm View",    "F1"},
+        {"RAM Dump",       "F2"},
+        {"SFR Dump",       "F3"},
+        {"XDATA Dump",     "F4"},
         {"Breakpoints",    "F8"},
         {"Execution Log",  "L"},
         {"Quit",           "q"}
     };
 
     int y = 1;
-    for (size_t i = 0; i < options.size() && y < h - 10; ++i, ++y) {
+    for (size_t i = 0; i < options.size() && y < h - 9; ++i, ++y) {
         bool selected = (static_cast<int>(i) == menu_selected_idx);
 
         if (selected) {
             wattron(win_menu, COLOR_PAIR(PAIR_MENU_SEL) | A_REVERSE | A_BOLD);
         }
 
-        std::string line = (selected ? "> " : "  ") + options[i].label;
+        std::string line = (selected ? ">" : " ") + options[i].label;
         std::string key_str = options[i].key;
 
         mvwprintw(win_menu, y, 1, "%-*s", w - 2, "");
         mvwprintw(win_menu, y, 1, "%s", line.c_str());
-        if (w >= 24) {
+        if (w >= 22) {
             mvwprintw(win_menu, y, w - 1 - key_str.length(), "%s", key_str.c_str());
         }
 
@@ -205,36 +204,43 @@ void TUI::render_menu() {
         }
     }
 
-    // Divider
-    if (y < h - 7) {
+    if (y < h - 6) {
         mvwhline(win_menu, y, 1, ACS_HLINE, w - 2);
         wattron(win_menu, A_BOLD | COLOR_PAIR(PAIR_HEADER));
-        mvwprintw(win_menu, y, 2, "[ CPU REGISTERS ]");
+        mvwprintw(win_menu, y, 2, "[ REGISTERS ]");
         wattroff(win_menu, A_BOLD | COLOR_PAIR(PAIR_HEADER));
         y++;
 
-        // Register HUD
-        mvwprintw(win_menu, y++, 2, "PC: 0x%04X   SP: 0x%02X", cpu.get_pc(), cpu.get_sp());
+        mvwprintw(win_menu, y++, 2, "PC:0x%04X SP:0x%02X", cpu.get_pc(), cpu.get_sp());
         mvwprintw(win_menu, y++, 2, "DPTR: 0x%04X", cpu.get_dptr());
-        mvwprintw(win_menu, y++, 2, "ACC: 0x%02X     B: 0x%02X", cpu.get_acc(), cpu.get_b());
-        mvwprintw(win_menu, y++, 2, "PSW: 0x%02X   [Bank %d]", cpu.get_psw(), cpu.get_active_bank());
+        mvwprintw(win_menu, y++, 2, "ACC:0x%02X  B:0x%02X", cpu.get_acc(), cpu.get_b());
+        mvwprintw(win_menu, y++, 2, "PSW:0x%02X [B%d]", cpu.get_psw(), cpu.get_active_bank());
         mvwprintw(win_menu, y++, 2, "CY:%d AC:%d OV:%d P:%d", cpu.get_cy(), cpu.get_ac(), cpu.get_ov(), cpu.get_p());
 
         if (y < h - 4) {
             mvwhline(win_menu, y, 1, ACS_HLINE, w - 2);
             wattron(win_menu, A_BOLD | COLOR_PAIR(PAIR_HEADER));
-            mvwprintw(win_menu, y, 2, "[ R0 - R7 ]");
+            mvwprintw(win_menu, y, 2, "[ R0-R7 ]");
             wattroff(win_menu, A_BOLD | COLOR_PAIR(PAIR_HEADER));
             y++;
 
-            mvwprintw(win_menu, y++, 2, "R0:0x%02X  R1:0x%02X", cpu.get_rn(0), cpu.get_rn(1));
-            mvwprintw(win_menu, y++, 2, "R2:0x%02X  R3:0x%02X", cpu.get_rn(2), cpu.get_rn(3));
-            if (y < h - 1) mvwprintw(win_menu, y++, 2, "R4:0x%02X  R5:0x%02X", cpu.get_rn(4), cpu.get_rn(5));
-            if (y < h - 1) mvwprintw(win_menu, y++, 2, "R6:0x%02X  R7:0x%02X", cpu.get_rn(6), cpu.get_rn(7));
+            if (h >= 24) {
+                mvwprintw(win_menu, y++, 2, "R0:0x%02X R1:0x%02X", cpu.get_rn(0), cpu.get_rn(1));
+                mvwprintw(win_menu, y++, 2, "R2:0x%02X R3:0x%02X", cpu.get_rn(2), cpu.get_rn(3));
+                if (y < h - 1) mvwprintw(win_menu, y++, 2, "R4:0x%02X R5:0x%02X", cpu.get_rn(4), cpu.get_rn(5));
+                if (y < h - 1) mvwprintw(win_menu, y++, 2, "R6:0x%02X R7:0x%02X", cpu.get_rn(6), cpu.get_rn(7));
+            } else {
+                mvwprintw(win_menu, y++, 2, "R0-3: %02X %02X %02X %02X",
+                          cpu.get_rn(0), cpu.get_rn(1), cpu.get_rn(2), cpu.get_rn(3));
+                if (y < h - 1) {
+                    mvwprintw(win_menu, y++, 2, "R4-7: %02X %02X %02X %02X",
+                              cpu.get_rn(4), cpu.get_rn(5), cpu.get_rn(6), cpu.get_rn(7));
+                }
+            }
         }
     }
 
-    wrefresh(win_menu);
+    wnoutrefresh(win_menu);
 }
 
 void TUI::render_main() {
@@ -251,7 +257,7 @@ void TUI::render_main() {
         case MainView::Log:         render_log(); break;
     }
 
-    wrefresh(win_main);
+    wnoutrefresh(win_main);
 }
 
 void TUI::render_disassembly() {
@@ -259,7 +265,11 @@ void TUI::render_disassembly() {
     getmaxyx(win_main, h, w);
 
     wattron(win_main, A_BOLD | COLOR_PAIR(PAIR_HEADER));
-    mvwprintw(win_main, 0, 2, "[ DISASSEMBLY / CODE VIEW ] (PgUp/PgDn to scroll, 'c' to center)");
+    if (w >= 45) {
+        mvwprintw(win_main, 0, 2, "[ CODE VIEW ] (PgUp/Dn:Scroll, c:PC)");
+    } else {
+        mvwprintw(win_main, 0, 2, "[ CODE ]");
+    }
     wattroff(win_main, A_BOLD | COLOR_PAIR(PAIR_HEADER));
 
     uint16_t curr_addr = scroll_offset;
@@ -282,15 +292,15 @@ void TUI::render_disassembly() {
             mvwprintw(win_main, y, 1, "   ");
         }
 
-        mvwprintw(win_main, y, 4, "%s %04X:  %-10s %-6s %-16s",
+        mvwprintw(win_main, y, 4, "%s %04X: %-8s %-5s %-12s",
                   (is_pc ? "=>" : "  "),
                   res.address,
                   res.bytes_hex.c_str(),
                   res.mnemonic.c_str(),
                   res.operands.c_str());
 
-        if (w >= 65) {
-            mvwprintw(win_main, y, w - 12, "[%d cycles]", res.cycles);
+        if (w >= 50) {
+            mvwprintw(win_main, y, w - 10, "[%d cyc]", res.cycles);
         }
 
         if (is_pc) {
@@ -304,46 +314,45 @@ void TUI::render_disassembly() {
 void TUI::render_internal_ram() {
     int h, w;
     getmaxyx(win_main, h, w);
-    (void)h;
 
     wattron(win_main, A_BOLD | COLOR_PAIR(PAIR_HEADER));
-    mvwprintw(win_main, 0, 2, "[ INTERNAL RAM (0x00-0x7F Direct, 0x80-0xFF Indirect) ]");
+    mvwprintw(win_main, 0, 2, "[ INTERNAL RAM ]");
     wattroff(win_main, A_BOLD | COLOR_PAIR(PAIR_HEADER));
 
+    bool show_ascii = (w >= 74);
+
     wattron(win_main, COLOR_PAIR(PAIR_HEADER));
-    mvwprintw(win_main, 1, 2, "Addr  00 01 02 03 04 05 06 07  08 09 0A 0B 0C 0D 0E 0F   ASCII");
+    if (show_ascii) {
+        mvwprintw(win_main, 1, 2, "Addr 00 01 02 03 04 05 06 07  08 09 0A 0B 0C 0D 0E 0F  ASCII");
+    } else {
+        mvwprintw(win_main, 1, 2, "Addr 00 01 02 03 04 05 06 07  08 09 0A 0B 0C 0D 0E 0F");
+    }
     wattroff(win_main, COLOR_PAIR(PAIR_HEADER));
 
     for (int row = 0; row < 16 && (2 + row) < h - 1; ++row) {
         int y = 2 + row;
         uint8_t base_addr = row * 16;
 
-        mvwprintw(win_main, y, 2, "0x%02X: ", base_addr);
+        mvwprintw(win_main, y, 2, "%02X: ", base_addr);
 
         std::string ascii_str;
         for (int col = 0; col < 16; ++col) {
             uint8_t addr = base_addr + col;
             uint8_t val = (addr < 0x80) ? memory.read_direct(addr) : memory.read_indirect(addr);
 
-            int x = 8 + (col * 3) + (col >= 8 ? 1 : 0);
+            int x = 6 + (col * 3) + (col >= 8 ? 1 : 0);
+            if (x + 2 >= w) break;
 
-            if (val != 0) {
-                wattron(win_main, COLOR_PAIR(PAIR_NONZERO) | A_BOLD);
-            }
+            if (val != 0) wattron(win_main, COLOR_PAIR(PAIR_NONZERO) | A_BOLD);
             mvwprintw(win_main, y, x, "%02X", val);
-            if (val != 0) {
-                wattroff(win_main, COLOR_PAIR(PAIR_NONZERO) | A_BOLD);
-            }
+            if (val != 0) wattroff(win_main, COLOR_PAIR(PAIR_NONZERO) | A_BOLD);
 
             ascii_str += (val >= 32 && val <= 126) ? static_cast<char>(val) : '.';
         }
 
-        mvwprintw(win_main, y, 59, "|%s|", ascii_str.c_str());
-
-        if (base_addr == 0x00 && w >= 80) mvwprintw(win_main, y, 78, "<- Bank 0-1");
-        if (base_addr == 0x10 && w >= 80) mvwprintw(win_main, y, 78, "<- Bank 2-3");
-        if (base_addr == 0x20 && w >= 80) mvwprintw(win_main, y, 78, "<- Bit-RAM (0x20-0x2F)");
-        if (base_addr == 0x80 && w >= 80) mvwprintw(win_main, y, 78, "<- Upper 128B (Indirect)");
+        if (show_ascii && 56 + 18 < w) {
+            mvwprintw(win_main, y, 56, "|%s|", ascii_str.c_str());
+        }
     }
 }
 
@@ -352,42 +361,27 @@ void TUI::render_sfr() {
     getmaxyx(win_main, h, w);
 
     wattron(win_main, A_BOLD | COLOR_PAIR(PAIR_HEADER));
-    mvwprintw(win_main, 0, 2, "[ SPECIAL FUNCTION REGISTERS (Direct 0x80-0xFF) ]");
+    mvwprintw(win_main, 0, 2, "[ SFR REGISTERS ]");
     wattroff(win_main, A_BOLD | COLOR_PAIR(PAIR_HEADER));
 
     struct SfrInfo {
         uint8_t addr;
         std::string name;
-        std::string desc;
     };
 
     const std::vector<SfrInfo> sfrs = {
-        {sfr::P0,   "P0",   "Port 0 (Bit)"},
-        {sfr::SP,   "SP",   "Stack Pointer"},
-        {sfr::DPL,  "DPL",  "DPTR Low byte"},
-        {sfr::DPH,  "DPH",  "DPTR High byte"},
-        {sfr::PCON, "PCON", "Power Control"},
-        {sfr::TCON, "TCON", "Timer Control (Bit)"},
-        {sfr::TMOD, "TMOD", "Timer Mode"},
-        {sfr::TL0,  "TL0",  "Timer 0 Low"},
-        {sfr::TL1,  "TL1",  "Timer 1 Low"},
-        {sfr::TH0,  "TH0",  "Timer 0 High"},
-        {sfr::TH1,  "TH1",  "Timer 1 High"},
-        {sfr::P1,   "P1",   "Port 1 (Bit)"},
-        {sfr::SCON, "SCON", "Serial Control (Bit)"},
-        {sfr::SBUF, "SBUF", "Serial Buffer"},
-        {sfr::P2,   "P2",   "Port 2 (Bit)"},
-        {sfr::IE,   "IE",   "Interrupt Enable (Bit)"},
-        {sfr::P3,   "P3",   "Port 3 (Bit)"},
-        {sfr::IP,   "IP",   "Interrupt Priority (Bit)"},
-        {sfr::PSW,  "PSW",  "Program Status Word (Bit)"},
-        {sfr::ACC,  "ACC",  "Accumulator (Bit)"},
-        {sfr::B,    "B",    "B Register (Bit)"}
+        {sfr::P0,   "P0"},   {sfr::SP,   "SP"},   {sfr::DPL,  "DPL"},
+        {sfr::DPH,  "DPH"},  {sfr::PCON, "PCON"}, {sfr::TCON, "TCON"},
+        {sfr::TMOD, "TMOD"}, {sfr::TL0,  "TL0"},  {sfr::TL1,  "TL1"},
+        {sfr::TH0,  "TH0"},  {sfr::TH1,  "TH1"},  {sfr::P1,   "P1"},
+        {sfr::SCON, "SCON"}, {sfr::SBUF, "SBUF"}, {sfr::P2,   "P2"},
+        {sfr::IE,   "IE"},   {sfr::P3,   "P3"},   {sfr::IP,   "IP"},
+        {sfr::PSW,  "PSW"},  {sfr::ACC,  "ACC"},  {sfr::B,    "B"}
     };
 
-    bool two_columns = (w >= 75 && h < 24);
+    bool two_cols = (w >= 54);
 
-    if (two_columns) {
+    if (two_cols) {
         wattron(win_main, COLOR_PAIR(PAIR_HEADER));
         mvwprintw(win_main, 1, 2, "Addr Name Hex  Binary     Addr Name Hex  Binary");
         wattroff(win_main, COLOR_PAIR(PAIR_HEADER));
@@ -411,7 +405,7 @@ void TUI::render_sfr() {
         }
     } else {
         wattron(win_main, COLOR_PAIR(PAIR_HEADER));
-        mvwprintw(win_main, 1, 2, "Addr Name  Hex  Decimal  Binary    Description");
+        mvwprintw(win_main, 1, 2, "Addr Name  Hex  Binary");
         wattroff(win_main, COLOR_PAIR(PAIR_HEADER));
 
         for (size_t i = 0; i < sfrs.size(); ++i) {
@@ -419,13 +413,8 @@ void TUI::render_sfr() {
             if (y >= h - 1) break;
             const auto& item = sfrs[i];
             uint8_t val = memory.read_direct(item.addr);
-            mvwprintw(win_main, y, 2, "0x%02X %-5s 0x%02X %-8d %s  %-s",
-                      item.addr,
-                      item.name.c_str(),
-                      val,
-                      val,
-                      to_bin8(val).c_str(),
-                      (w >= 60 ? item.desc.c_str() : ""));
+            mvwprintw(win_main, y, 2, "0x%02X %-5s 0x%02X %s",
+                      item.addr, item.name.c_str(), val, to_bin8(val).c_str());
         }
     }
 }
@@ -435,11 +424,17 @@ void TUI::render_external_ram() {
     getmaxyx(win_main, h, w);
 
     wattron(win_main, A_BOLD | COLOR_PAIR(PAIR_HEADER));
-    mvwprintw(win_main, 0, 2, "[ EXTERNAL RAM (XDATA 64KB) ] (PgUp/PgDn to scroll)");
+    mvwprintw(win_main, 0, 2, "[ EXTERNAL RAM (XDATA) ]");
     wattroff(win_main, A_BOLD | COLOR_PAIR(PAIR_HEADER));
 
+    bool show_ascii = (w >= 74);
+
     wattron(win_main, COLOR_PAIR(PAIR_HEADER));
-    mvwprintw(win_main, 1, 2, "Addr    00 01 02 03 04 05 06 07  08 09 0A 0B 0C 0D 0E 0F   ASCII");
+    if (show_ascii) {
+        mvwprintw(win_main, 1, 2, "Addr 00 01 02 03 04 05 06 07  08 09 0A 0B 0C 0D 0E 0F  ASCII");
+    } else {
+        mvwprintw(win_main, 1, 2, "Addr 00 01 02 03 04 05 06 07  08 09 0A 0B 0C 0D 0E 0F");
+    }
     wattroff(win_main, COLOR_PAIR(PAIR_HEADER));
 
     for (int row = 0; row < h - 3; ++row) {
@@ -447,13 +442,14 @@ void TUI::render_external_ram() {
         uint32_t base = scroll_offset + (row * 16);
         if (base >= 65536) break;
 
-        mvwprintw(win_main, y, 2, "0x%04X: ", base);
+        mvwprintw(win_main, y, 2, "%04X:", base);
 
         std::string ascii_str;
         for (int col = 0; col < 16; ++col) {
             uint32_t addr = base + col;
             uint8_t val = (addr < 65536) ? memory.read_xdata(addr) : 0;
-            int x = 10 + (col * 3) + (col >= 8 ? 1 : 0);
+            int x = 8 + (col * 3) + (col >= 8 ? 1 : 0);
+            if (x + 2 >= w) break;
 
             if (val != 0) wattron(win_main, COLOR_PAIR(PAIR_NONZERO) | A_BOLD);
             mvwprintw(win_main, y, x, "%02X", val);
@@ -462,24 +458,24 @@ void TUI::render_external_ram() {
             ascii_str += (val >= 32 && val <= 126) ? static_cast<char>(val) : '.';
         }
 
-        mvwprintw(win_main, y, 61, "|%s|", ascii_str.c_str());
+        if (show_ascii && 58 + 18 < w) {
+            mvwprintw(win_main, y, 58, "|%s|", ascii_str.c_str());
+        }
     }
 }
 
 void TUI::render_breakpoints() {
     int h, w;
     getmaxyx(win_main, h, w);
-    (void)h;
-    (void)w;
 
     wattron(win_main, A_BOLD | COLOR_PAIR(PAIR_HEADER));
-    mvwprintw(win_main, 0, 2, "[ ACTIVE BREAKPOINTS ] (Use ':b <addr>' or ':del <addr>')");
+    mvwprintw(win_main, 0, 2, "[ BREAKPOINTS ]");
     wattroff(win_main, A_BOLD | COLOR_PAIR(PAIR_HEADER));
 
     const auto& bps = debugger.get_breakpoints();
     if (bps.empty()) {
-        mvwprintw(win_main, 3, 4, "No breakpoints currently set.");
-        mvwprintw(win_main, 5, 4, "Tip: In command bar at bottom, type ':b 0x0010' to add a breakpoint.");
+        mvwprintw(win_main, 3, 4, "No breakpoints set.");
+        mvwprintw(win_main, 5, 4, "Type ':b <addr>' at bottom to add a breakpoint.");
         return;
     }
 
@@ -491,7 +487,7 @@ void TUI::render_breakpoints() {
         mvwprintw(win_main, y, 3, "[*]");
         wattroff(win_main, COLOR_PAIR(PAIR_BP) | A_BOLD);
 
-        mvwprintw(win_main, y, 8, "0x%04X:  %-10s %-6s %-16s",
+        mvwprintw(win_main, y, 7, "0x%04X: %-8s %-5s %-12s",
                   bp, res.bytes_hex.c_str(), res.mnemonic.c_str(), res.operands.c_str());
         y++;
     }
@@ -502,7 +498,7 @@ void TUI::render_log() {
     getmaxyx(win_main, h, w);
 
     wattron(win_main, A_BOLD | COLOR_PAIR(PAIR_HEADER));
-    mvwprintw(win_main, 0, 2, "[ EXECUTION LOG & MESSAGES ]");
+    mvwprintw(win_main, 0, 2, "[ LOG & MESSAGES ]");
     wattroff(win_main, A_BOLD | COLOR_PAIR(PAIR_HEADER));
 
     int max_lines = h - 2;
@@ -511,7 +507,11 @@ void TUI::render_log() {
 
     int y = 1;
     for (size_t i = start_idx; i < message_log.size() && y < h - 1; ++i, ++y) {
-        mvwprintw(win_main, y, 2, "%-*s", w - 4, message_log[i].c_str());
+        std::string line = message_log[i];
+        if (static_cast<int>(line.length()) > w - 4) {
+            line = line.substr(0, w - 4);
+        }
+        mvwprintw(win_main, y, 2, "%s", line.c_str());
     }
 }
 
@@ -522,12 +522,15 @@ void TUI::render_status() {
     wbkgd(win_status, COLOR_PAIR(PAIR_STATUS));
 
     DisassemblyResult cur = Disassembler::disassemble(memory, cpu.get_pc());
-    std::string line = " [STATUS] PC: 0x" + to_hex16(cpu.get_pc()) +
+    std::string line = " [STATUS] PC:0x" + to_hex16(cpu.get_pc()) +
                        " | Next: " + cur.mnemonic + " " + cur.operands +
-                       " | Info: " + status_message;
+                       " | " + status_message;
 
-    mvwprintw(win_status, 0, 0, "%-*s", w, line.c_str());
-    wrefresh(win_status);
+    if (static_cast<int>(line.length()) > w - 2) {
+        line = line.substr(0, w - 2);
+    }
+    mvwprintw(win_status, 0, 0, "%s", line.c_str());
+    wnoutrefresh(win_status);
 }
 
 void TUI::render_cmd() {
@@ -538,15 +541,27 @@ void TUI::render_cmd() {
     if (is_command_mode) {
         curs_set(1);
         wattron(win_cmd, COLOR_PAIR(PAIR_CMD) | A_BOLD);
-        mvwprintw(win_cmd, 0, 0, ":%s", command_buffer.c_str());
+        std::string disp = ":" + command_buffer;
+        if (static_cast<int>(disp.length()) > w - 2) {
+            disp = disp.substr(disp.length() - (w - 2));
+        }
+        mvwprintw(win_cmd, 0, 0, "%s", disp.c_str());
         wattroff(win_cmd, COLOR_PAIR(PAIR_CMD) | A_BOLD);
-        wmove(win_cmd, 0, 1 + command_buffer.length());
+        wmove(win_cmd, 0, std::min(w - 2, static_cast<int>(disp.length())));
     } else {
         curs_set(0);
-        mvwprintw(win_cmd, 0, 0, "%-*s", w,
-                  " [COMMAND] Press ':' to enter command, Space/F7:Step, F5:Run, F1-F4:Views, q:Quit");
+        std::string tip;
+        if (w >= 75) {
+            tip = " [CMD] Press ':' for command, Space:Step, F5:Run, F1-F4:Views, q:Quit";
+        } else {
+            tip = " [CMD] ':' Cmd | Space:Step | F5:Run | q:Quit";
+        }
+        if (static_cast<int>(tip.length()) > w - 2) {
+            tip = tip.substr(0, w - 2);
+        }
+        mvwprintw(win_cmd, 0, 0, "%s", tip.c_str());
     }
-    wrefresh(win_cmd);
+    wnoutrefresh(win_cmd);
 }
 
 void TUI::render_all() {
@@ -556,11 +571,10 @@ void TUI::render_all() {
             getmaxyx(win_main, h, w);
             werase(win_main);
             box(win_main, 0, 0);
-            std::string msg = "Terminal too small: " + std::to_string(w) + "x" + std::to_string(h);
-            std::string tip = "Please resize window to at least 50x12.";
-            mvwprintw(win_main, std::max(1, h / 2 - 1), std::max(1, (w - static_cast<int>(msg.length())) / 2), "%s", msg.c_str());
-            mvwprintw(win_main, std::max(1, h / 2), std::max(1, (w - static_cast<int>(tip.length())) / 2), "%s", tip.c_str());
-            wrefresh(win_main);
+            std::string msg = "Terminal: " + std::to_string(w) + "x" + std::to_string(h) + " (min 40x10)";
+            mvwprintw(win_main, std::max(1, h / 2), std::max(1, (w - static_cast<int>(msg.length())) / 2), "%s", msg.c_str());
+            wnoutrefresh(win_main);
+            doupdate();
         }
         return;
     }
@@ -570,6 +584,7 @@ void TUI::render_all() {
     render_main();
     render_status();
     render_cmd();
+    doupdate();
 }
 
 void TUI::execute_menu_action(int idx) {
@@ -578,7 +593,7 @@ void TUI::execute_menu_action(int idx) {
             if (!cpu.is_halted()) {
                 uint8_t c = cpu.step();
                 center_disassembly_on_pc();
-                log_message("Stepped 1 instruction (" + std::to_string(c) + " cycles).");
+                log_message("Stepped (" + std::to_string(c) + " cycles).");
             } else {
                 log_message("CPU is halted.");
             }
@@ -590,7 +605,7 @@ void TUI::execute_menu_action(int idx) {
         case 2: // Reset
             cpu.reset();
             center_disassembly_on_pc();
-            log_message("CPU reset to power-on state.");
+            log_message("CPU reset.");
             break;
         case 3: current_view = MainView::Disassembly; center_disassembly_on_pc(); break;
         case 4: current_view = MainView::InternalRAM; break;
@@ -631,7 +646,7 @@ void TUI::execute_command(const std::string& cmd_str) {
         for (size_t i = 0; i < n && !cpu.is_halted(); ++i) {
             cpu.step();
             if (debugger.has_breakpoint(cpu.get_pc())) {
-                log_message("Breakpoint reached at 0x" + to_hex16(cpu.get_pc()));
+                log_message("Breakpoint at 0x" + to_hex16(cpu.get_pc()));
                 break;
             }
         }
@@ -806,7 +821,7 @@ void TUI::handle_input(int ch, bool& should_exit) {
         case 'c':
         case 'C':
             center_disassembly_on_pc();
-            log_message("Centered disassembly on PC=0x" + to_hex16(cpu.get_pc()));
+            log_message("Centered on PC=0x" + to_hex16(cpu.get_pc()));
             break;
 
         case KEY_PPAGE: // Page Up
@@ -834,18 +849,23 @@ void TUI::handle_input(int ch, bool& should_exit) {
 void TUI::run() {
     bool should_exit = false;
 
-    // Initial render
     render_all();
 
     while (!should_exit) {
+        WINDOW* input_win = win_cmd ? win_cmd : win_main;
+        if (!input_win) {
+            usleep(50000);
+            continue;
+        }
+
         if (is_running_continuous) {
-            wtimeout(stdscr, 25);
-            int ch = getch();
+            wtimeout(input_win, 25);
+            int ch = wgetch(input_win);
             if (ch == KEY_RESIZE) {
                 resize_all();
             } else if (ch != ERR) {
                 is_running_continuous = false;
-                log_message("Continuous run stopped by user keypress.");
+                log_message("Continuous run paused.");
                 render_all();
             } else {
                 for (int i = 0; i < 150 && is_running_continuous; ++i) {
@@ -865,9 +885,8 @@ void TUI::run() {
                 render_all();
             }
         } else {
-            // Blocking wait: ncurses automatically wakes up on keypress OR terminal resize (KEY_RESIZE)
-            wtimeout(stdscr, -1);
-            int ch = getch();
+            wtimeout(input_win, -1);
+            int ch = wgetch(input_win);
             if (ch == KEY_RESIZE) {
                 resize_all();
             } else if (ch != ERR) {
