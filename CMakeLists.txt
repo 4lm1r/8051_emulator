@@ -1,9 +1,12 @@
 cmake_minimum_required(VERSION 3.15)
-project(8051_emulator VERSION 1.1.0 LANGUAGES CXX)
+project(8051_emulator VERSION 1.2.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
+# Find ncurses
+find_package(Curses REQUIRED)
 
 # Compiler Warnings
 if(MSVC)
@@ -18,9 +21,11 @@ add_library(8051_core STATIC
     src/cpu.cpp
     src/disassembler.cpp
     src/debugger.cpp
+    src/tui.cpp
 )
 
-target_include_directories(8051_core PUBLIC include)
+target_include_directories(8051_core PUBLIC include ${CURSES_INCLUDE_DIRS})
+target_link_libraries(8051_core PUBLIC ${CURSES_LIBRARIES})
 
 # Main Emulator Executable
 add_executable(${PROJECT_NAME} src/main.cpp)

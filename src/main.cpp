@@ -1,6 +1,7 @@
 #include "memory.hpp"
 #include "cpu.hpp"
 #include "debugger.hpp"
+#include "tui.hpp"
 #include <iostream>
 #include <string>
 #include <vector>
@@ -56,7 +57,8 @@ int main(int argc, char* argv[]) {
     std::string filename = "";
     bool run_mode = false;
     bool trace_mode = false;
-    bool force_repl = false;
+    bool cli_mode = false;
+    bool tui_mode = false;
     uint64_t max_steps = 10000;
 
     for (int i = 1; i < argc; ++i) {
@@ -66,8 +68,10 @@ int main(int argc, char* argv[]) {
         } else if (arg == "--trace" || arg == "-t") {
             trace_mode = true;
             run_mode = true;
-        } else if (arg == "--repl" || arg == "-i") {
-            force_repl = true;
+        } else if (arg == "--cli" || arg == "--repl") {
+            cli_mode = true;
+        } else if (arg == "--tui" || arg == "-u") {
+            tui_mode = true;
         } else if (arg == "--steps" || arg == "-s") {
             if (i + 1 < argc) {
                 max_steps = std::stoull(argv[++i]);
@@ -75,10 +79,11 @@ int main(int argc, char* argv[]) {
         } else if (arg == "--help" || arg == "-h") {
             std::cout << "Usage: " << argv[0] << " [options] [firmware.hex | firmware.bin]\n\n"
                       << "Options:\n"
-                      << "  --run, -r          Run automatically instead of opening REPL\n"
-                      << "  --trace, -t        Trace each instruction during execution\n"
-                      << "  --steps, -s <N>    Maximum steps to execute (default: 10000)\n"
-                      << "  --repl, -i         Force interactive REPL after loading\n"
+                      << "  --tui, -u          Launch interactive ncurses TUI interface (default in terminal)\n"
+                      << "  --cli, --repl      Launch text-based CLI debugger shell instead of TUI\n"
+                      << "  --run, -r          Run automatically in batch mode without UI\n"
+                      << "  --trace, -t        Trace each instruction during batch execution\n"
+                      << "  --steps, -s <N>    Maximum steps to execute in batch mode (default: 10000)\n"
                       << "  --help, -h         Display this help message\n";
             return 0;
         } else if (arg[0] != '-') {
@@ -98,38 +103,54 @@ int main(int argc, char* argv[]) {
             std::cerr << "Failed to load program file: " << filename << std::endl;
             return 1;
         }
-        std::cout << "Loaded: " << filename << std::endl;
     } else {
-        std::cout << "No program file specified. Loading built-in 8051 demonstration program...\n";
         load_demo_program(memory);
     }
 
     bool is_interactive = isatty(fileno(stdin));
 
-    if (run_mode && !force_repl) {
+    if (run_mode) {
+        if (!filename.empty()) {
+            std::cout << "Loaded: " << filename << std::endl;
+        } else {
+            std::cout << "No program file specified. Loaded built-in 8051 demonstration program.\n";
+        }
         dbg.run_batch(max_steps, trace_mode);
         return 0;
     }
 
-    if (is_interactive || force_repl) {
-        dbg.run_repl();
-    } else {
-        // Non-interactive fallback: execute demo steps and dump results
-        std::cout << "\n--- Initial CPU State ---\n";
-        cpu.print_status();
-
-        std::cout << "\n--- Stepping 10 instructions ---\n";
-        for (int i = 0; i < 10; ++i) {
-            std::cout << "Step " << (i + 1) << ": " << cpu.disassemble_current() << "\n";
-            cpu.step();
+    if (cli_mode) {
+        if (!filename.empty()) {
+            std::cout << "Loaded: " << filename << std::endl;
+        } else {
+            std::cout << "No program file specified. Loading built-in 8051 demonstration program...\n";
         }
-
-        std::cout << "\n--- Final CPU State ---\n";
-        cpu.print_status();
-
-        std::cout << "\n--- Internal RAM & SFRs ---\n";
-        memory.dump();
+        dbg.run_repl();
+        return 0;
     }
+
+    if (tui_mode || is_interactive) {
+        TUI tui(cpu, memory, dbg, filename);
+        tui.run();
+        return 0;
+    }
+
+    // Non-interactive fallback when piped or stdin is not a terminal
+    std::cout << "No program file specified. Running demonstration program...\n";
+    std::cout << "\n--- Initial CPU State ---\n";
+    cpu.print_status();
+
+    std::cout << "\n--- Stepping 10 instructions ---\n";
+    for (int i = 0; i < 10; ++i) {
+        std::cout << "Step " << (i + 1) << ": " << cpu.disassemble_current() << "\n";
+        cpu.step();
+    }
+
+    std::cout << "\n--- Final CPU State ---\n";
+    cpu.print_status();
+
+    std::cout << "\n--- Internal RAM & SFRs ---\n";
+    memory.dump();
 
     return 0;
 }

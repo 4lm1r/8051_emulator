@@ -19,6 +19,8 @@ public:
     void remove_breakpoint(uint16_t addr);
     void list_breakpoints() const;
     bool has_breakpoint(uint16_t addr) const;
+    const std::set<uint16_t>& get_breakpoints() const { return breakpoints; }
+    void clear_breakpoints() { breakpoints.clear(); }
 
 private:
     CPU& cpu;
