@@ -4,6 +4,9 @@
 #include <sstream>
 #include <iomanip>
 #include <algorithm>
+#include <signal.h>
+#include <sys/ioctl.h>
+#include <unistd.h>
 
 enum ColorPairs {
     PAIR_DEFAULT = 0,
@@ -18,6 +21,10 @@ enum ColorPairs {
     PAIR_NONZERO = 9
 };
 
+static volatile sig_atomic_t g_terminal_resized = 0;
+static void sigwinch_handler(int) {
+    g_terminal_resized = 1;
+}
 
 static std::string to_hex16(uint16_t val) {
     std::ostringstream ss;
@@ -45,6 +52,8 @@ TUI::TUI(CPU& c, Memory& m, Debugger& dbg, const std::string& loaded_file)
     keypad(stdscr, TRUE);
     curs_set(0);
 
+    signal(SIGWINCH, sigwinch_handler);
+
     init_colors();
     create_windows();
 
@@ -53,6 +62,7 @@ TUI::TUI(CPU& c, Memory& m, Debugger& dbg, const std::string& loaded_file)
 }
 
 TUI::~TUI() {
+    signal(SIGWINCH, SIG_DFL);
     destroy_windows();
     endwin();
 }
@@ -75,10 +85,17 @@ void TUI::init_colors() {
 }
 
 void TUI::create_windows() {
-    int h, w;
+    int h = 0, w = 0;
     getmaxyx(stdscr, h, w);
 
-    int menu_w = (w >= 105) ? 30 : ((w >= 85) ? 26 : 22);
+    if (h < 12 || w < 50) {
+        // Fallback for very small terminal size
+        win_main = newwin(h, w, 0, 0);
+        return;
+    }
+
+    // Proportional & responsive menu width:
+    int menu_w = (w >= 120) ? 30 : ((w >= 90) ? 26 : 24);
     int main_w = w - menu_w;
     int mid_h = h - 3;
     if (mid_h < 4) mid_h = 4;
@@ -103,8 +120,22 @@ void TUI::destroy_windows() {
 }
 
 void TUI::resize_all() {
+    struct winsize ws;
+    if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == 0 && ws.ws_col > 0 && ws.ws_row > 0) {
+        resizeterm(ws.ws_row, ws.ws_col);
+    } else {
+        resizeterm(0, 0);
+    }
+
+    endwin();
+    refresh();
+    clear();
+
     destroy_windows();
     create_windows();
+
+    clear();
+    refresh();
     render_all();
 }
 
@@ -121,6 +152,7 @@ void TUI::center_disassembly_on_pc() {
 }
 
 void TUI::render_title() {
+    if (!win_title) return;
     int w = getmaxx(win_title);
     werase(win_title);
     wbkgd(win_title, COLOR_PAIR(PAIR_TITLE));
@@ -137,6 +169,7 @@ void TUI::render_title() {
 }
 
 void TUI::render_menu() {
+    if (!win_menu) return;
     int h, w;
     getmaxyx(win_menu, h, w);
     werase(win_menu);
@@ -166,7 +199,7 @@ void TUI::render_menu() {
     };
 
     int y = 1;
-    for (size_t i = 0; i < options.size() && y < h - 14; ++i, ++y) {
+    for (size_t i = 0; i < options.size() && y < h - 10; ++i, ++y) {
         bool selected = (static_cast<int>(i) == menu_selected_idx);
 
         if (selected) {
@@ -176,10 +209,9 @@ void TUI::render_menu() {
         std::string line = (selected ? "> " : "  ") + options[i].label;
         std::string key_str = options[i].key;
 
-        // Fill line
         mvwprintw(win_menu, y, 1, "%-*s", w - 2, "");
         mvwprintw(win_menu, y, 1, "%s", line.c_str());
-        if (w >= 26) {
+        if (w >= 24) {
             mvwprintw(win_menu, y, w - 1 - key_str.length(), "%s", key_str.c_str());
         }
 
@@ -189,40 +221,39 @@ void TUI::render_menu() {
     }
 
     // Divider
-    mvwhline(win_menu, y, 1, ACS_HLINE, w - 2);
-    wattron(win_menu, A_BOLD | COLOR_PAIR(PAIR_HEADER));
-    mvwprintw(win_menu, y, 2, "[ CPU REGISTERS ]");
-    wattroff(win_menu, A_BOLD | COLOR_PAIR(PAIR_HEADER));
-    y++;
-
-    // Register HUD
-    mvwprintw(win_menu, y++, 2, "PC: 0x%04X   SP: 0x%02X", cpu.get_pc(), cpu.get_sp());
-    mvwprintw(win_menu, y++, 2, "DPTR: 0x%04X", cpu.get_dptr());
-    mvwprintw(win_menu, y++, 2, "ACC: 0x%02X     B: 0x%02X", cpu.get_acc(), cpu.get_b());
-    mvwprintw(win_menu, y++, 2, "PSW: 0x%02X   [Bank %d]", cpu.get_psw(), cpu.get_active_bank());
-    mvwprintw(win_menu, y++, 2, "CY:%d AC:%d OV:%d P:%d", cpu.get_cy(), cpu.get_ac(), cpu.get_ov(), cpu.get_p());
-
-    if (y < h - 4) {
+    if (y < h - 7) {
         mvwhline(win_menu, y, 1, ACS_HLINE, w - 2);
         wattron(win_menu, A_BOLD | COLOR_PAIR(PAIR_HEADER));
-        mvwprintw(win_menu, y, 2, "[ R0 - R7 ]");
+        mvwprintw(win_menu, y, 2, "[ CPU REGISTERS ]");
         wattroff(win_menu, A_BOLD | COLOR_PAIR(PAIR_HEADER));
         y++;
 
-        mvwprintw(win_menu, y++, 2, "R0:0x%02X  R1:0x%02X", cpu.get_rn(0), cpu.get_rn(1));
-        mvwprintw(win_menu, y++, 2, "R2:0x%02X  R3:0x%02X", cpu.get_rn(2), cpu.get_rn(3));
-        if (y < h - 1) mvwprintw(win_menu, y++, 2, "R4:0x%02X  R5:0x%02X", cpu.get_rn(4), cpu.get_rn(5));
-        if (y < h - 1) mvwprintw(win_menu, y++, 2, "R6:0x%02X  R7:0x%02X", cpu.get_rn(6), cpu.get_rn(7));
+        // Register HUD
+        mvwprintw(win_menu, y++, 2, "PC: 0x%04X   SP: 0x%02X", cpu.get_pc(), cpu.get_sp());
+        mvwprintw(win_menu, y++, 2, "DPTR: 0x%04X", cpu.get_dptr());
+        mvwprintw(win_menu, y++, 2, "ACC: 0x%02X     B: 0x%02X", cpu.get_acc(), cpu.get_b());
+        mvwprintw(win_menu, y++, 2, "PSW: 0x%02X   [Bank %d]", cpu.get_psw(), cpu.get_active_bank());
+        mvwprintw(win_menu, y++, 2, "CY:%d AC:%d OV:%d P:%d", cpu.get_cy(), cpu.get_ac(), cpu.get_ov(), cpu.get_p());
+
+        if (y < h - 4) {
+            mvwhline(win_menu, y, 1, ACS_HLINE, w - 2);
+            wattron(win_menu, A_BOLD | COLOR_PAIR(PAIR_HEADER));
+            mvwprintw(win_menu, y, 2, "[ R0 - R7 ]");
+            wattroff(win_menu, A_BOLD | COLOR_PAIR(PAIR_HEADER));
+            y++;
+
+            mvwprintw(win_menu, y++, 2, "R0:0x%02X  R1:0x%02X", cpu.get_rn(0), cpu.get_rn(1));
+            mvwprintw(win_menu, y++, 2, "R2:0x%02X  R3:0x%02X", cpu.get_rn(2), cpu.get_rn(3));
+            if (y < h - 1) mvwprintw(win_menu, y++, 2, "R4:0x%02X  R5:0x%02X", cpu.get_rn(4), cpu.get_rn(5));
+            if (y < h - 1) mvwprintw(win_menu, y++, 2, "R6:0x%02X  R7:0x%02X", cpu.get_rn(6), cpu.get_rn(7));
+        }
     }
 
     wrefresh(win_menu);
 }
 
 void TUI::render_main() {
-    int h, w;
-    getmaxyx(win_main, h, w);
-    (void)h;
-    (void)w;
+    if (!win_main) return;
     werase(win_main);
     box(win_main, 0, 0);
 
@@ -256,10 +287,8 @@ void TUI::render_disassembly() {
             wattron(win_main, COLOR_PAIR(PAIR_PC_LINE) | A_BOLD);
         }
 
-        // Clear line
         mvwprintw(win_main, y, 1, "%-*s", w - 2, "");
 
-        // Indicator
         if (is_bp) {
             wattron(win_main, COLOR_PAIR(PAIR_BP) | A_BOLD);
             mvwprintw(win_main, y, 1, "[*]");
@@ -296,12 +325,11 @@ void TUI::render_internal_ram() {
     mvwprintw(win_main, 0, 2, "[ INTERNAL RAM (0x00-0x7F Direct, 0x80-0xFF Indirect) ]");
     wattroff(win_main, A_BOLD | COLOR_PAIR(PAIR_HEADER));
 
-    // Columns header
     wattron(win_main, COLOR_PAIR(PAIR_HEADER));
     mvwprintw(win_main, 1, 2, "Addr  00 01 02 03 04 05 06 07  08 09 0A 0B 0C 0D 0E 0F   ASCII");
     wattroff(win_main, COLOR_PAIR(PAIR_HEADER));
 
-    for (int row = 0; row < 16; ++row) {
+    for (int row = 0; row < 16 && (2 + row) < h - 1; ++row) {
         int y = 2 + row;
         uint8_t base_addr = row * 16;
 
@@ -327,7 +355,6 @@ void TUI::render_internal_ram() {
 
         mvwprintw(win_main, y, 59, "|%s|", ascii_str.c_str());
 
-        // Context label
         if (base_addr == 0x00 && w >= 80) mvwprintw(win_main, y, 78, "<- Bank 0-1");
         if (base_addr == 0x10 && w >= 80) mvwprintw(win_main, y, 78, "<- Bank 2-3");
         if (base_addr == 0x20 && w >= 80) mvwprintw(win_main, y, 78, "<- Bit-RAM (0x20-0x2F)");
@@ -338,7 +365,6 @@ void TUI::render_internal_ram() {
 void TUI::render_sfr() {
     int h, w;
     getmaxyx(win_main, h, w);
-    (void)h;
 
     wattron(win_main, A_BOLD | COLOR_PAIR(PAIR_HEADER));
     mvwprintw(win_main, 0, 2, "[ SPECIAL FUNCTION REGISTERS (Direct 0x80-0xFF) ]");
@@ -351,44 +377,71 @@ void TUI::render_sfr() {
     };
 
     const std::vector<SfrInfo> sfrs = {
-        {sfr::P0,   "P0",   "Port 0 (Bit-addressable)"},
+        {sfr::P0,   "P0",   "Port 0 (Bit)"},
         {sfr::SP,   "SP",   "Stack Pointer"},
-        {sfr::DPL,  "DPL",  "Data Pointer Low byte"},
-        {sfr::DPH,  "DPH",  "Data Pointer High byte"},
+        {sfr::DPL,  "DPL",  "DPTR Low byte"},
+        {sfr::DPH,  "DPH",  "DPTR High byte"},
         {sfr::PCON, "PCON", "Power Control"},
-        {sfr::TCON, "TCON", "Timer/Counter Control (Bit-addressable)"},
-        {sfr::TMOD, "TMOD", "Timer/Counter Mode"},
-        {sfr::TL0,  "TL0",  "Timer 0 Low byte"},
-        {sfr::TL1,  "TL1",  "Timer 1 Low byte"},
-        {sfr::TH0,  "TH0",  "Timer 0 High byte"},
-        {sfr::TH1,  "TH1",  "Timer 1 High byte"},
-        {sfr::P1,   "P1",   "Port 1 (Bit-addressable)"},
-        {sfr::SCON, "SCON", "Serial Control (Bit-addressable)"},
-        {sfr::SBUF, "SBUF", "Serial Data Buffer"},
-        {sfr::P2,   "P2",   "Port 2 (Bit-addressable)"},
-        {sfr::IE,   "IE",   "Interrupt Enable (Bit-addressable)"},
-        {sfr::P3,   "P3",   "Port 3 (Bit-addressable)"},
-        {sfr::IP,   "IP",   "Interrupt Priority (Bit-addressable)"},
-        {sfr::PSW,  "PSW",  "Program Status Word (Bit-addressable)"},
-        {sfr::ACC,  "ACC",  "Accumulator (Bit-addressable)"},
-        {sfr::B,    "B",    "B Register (Bit-addressable)"}
+        {sfr::TCON, "TCON", "Timer Control (Bit)"},
+        {sfr::TMOD, "TMOD", "Timer Mode"},
+        {sfr::TL0,  "TL0",  "Timer 0 Low"},
+        {sfr::TL1,  "TL1",  "Timer 1 Low"},
+        {sfr::TH0,  "TH0",  "Timer 0 High"},
+        {sfr::TH1,  "TH1",  "Timer 1 High"},
+        {sfr::P1,   "P1",   "Port 1 (Bit)"},
+        {sfr::SCON, "SCON", "Serial Control (Bit)"},
+        {sfr::SBUF, "SBUF", "Serial Buffer"},
+        {sfr::P2,   "P2",   "Port 2 (Bit)"},
+        {sfr::IE,   "IE",   "Interrupt Enable (Bit)"},
+        {sfr::P3,   "P3",   "Port 3 (Bit)"},
+        {sfr::IP,   "IP",   "Interrupt Priority (Bit)"},
+        {sfr::PSW,  "PSW",  "Program Status Word (Bit)"},
+        {sfr::ACC,  "ACC",  "Accumulator (Bit)"},
+        {sfr::B,    "B",    "B Register (Bit)"}
     };
 
-    wattron(win_main, COLOR_PAIR(PAIR_HEADER));
-    mvwprintw(win_main, 1, 2, "Addr Name  Hex  Decimal  Binary    Description");
-    wattroff(win_main, COLOR_PAIR(PAIR_HEADER));
+    bool two_columns = (w >= 75 && h < 24);
 
-    int y = 2;
-    for (const auto& item : sfrs) {
-        uint8_t val = memory.read_direct(item.addr);
-        mvwprintw(win_main, y, 2, "0x%02X %-5s 0x%02X %-8d %s  %-s",
-                  item.addr,
-                  item.name.c_str(),
-                  val,
-                  val,
-                  to_bin8(val).c_str(),
-                  (w >= 60 ? item.desc.c_str() : ""));
-        y++;
+    if (two_columns) {
+        wattron(win_main, COLOR_PAIR(PAIR_HEADER));
+        mvwprintw(win_main, 1, 2, "Addr Name Hex  Binary     Addr Name Hex  Binary");
+        wattroff(win_main, COLOR_PAIR(PAIR_HEADER));
+
+        size_t half = (sfrs.size() + 1) / 2;
+        for (size_t i = 0; i < half; ++i) {
+            int y = 2 + i;
+            if (y >= h - 1) break;
+
+            const auto& s1 = sfrs[i];
+            uint8_t v1 = memory.read_direct(s1.addr);
+            mvwprintw(win_main, y, 2, "0x%02X %-4s 0x%02X %s",
+                      s1.addr, s1.name.c_str(), v1, to_bin8(v1).c_str());
+
+            if (i + half < sfrs.size()) {
+                const auto& s2 = sfrs[i + half];
+                uint8_t v2 = memory.read_direct(s2.addr);
+                mvwprintw(win_main, y, 28, "0x%02X %-4s 0x%02X %s",
+                          s2.addr, s2.name.c_str(), v2, to_bin8(v2).c_str());
+            }
+        }
+    } else {
+        wattron(win_main, COLOR_PAIR(PAIR_HEADER));
+        mvwprintw(win_main, 1, 2, "Addr Name  Hex  Decimal  Binary    Description");
+        wattroff(win_main, COLOR_PAIR(PAIR_HEADER));
+
+        for (size_t i = 0; i < sfrs.size(); ++i) {
+            int y = 2 + i;
+            if (y >= h - 1) break;
+            const auto& item = sfrs[i];
+            uint8_t val = memory.read_direct(item.addr);
+            mvwprintw(win_main, y, 2, "0x%02X %-5s 0x%02X %-8d %s  %-s",
+                      item.addr,
+                      item.name.c_str(),
+                      val,
+                      val,
+                      to_bin8(val).c_str(),
+                      (w >= 60 ? item.desc.c_str() : ""));
+        }
     }
 }
 
@@ -447,6 +500,7 @@ void TUI::render_breakpoints() {
 
     int y = 2;
     for (uint16_t bp : bps) {
+        if (y >= h - 1) break;
         DisassemblyResult res = Disassembler::disassemble(memory, bp);
         wattron(win_main, COLOR_PAIR(PAIR_BP) | A_BOLD);
         mvwprintw(win_main, y, 3, "[*]");
@@ -477,6 +531,7 @@ void TUI::render_log() {
 }
 
 void TUI::render_status() {
+    if (!win_status) return;
     int w = getmaxx(win_status);
     werase(win_status);
     wbkgd(win_status, COLOR_PAIR(PAIR_STATUS));
@@ -491,6 +546,7 @@ void TUI::render_status() {
 }
 
 void TUI::render_cmd() {
+    if (!win_cmd) return;
     int w = getmaxx(win_cmd);
     werase(win_cmd);
 
@@ -509,6 +565,21 @@ void TUI::render_cmd() {
 }
 
 void TUI::render_all() {
+    if (!win_title) {
+        if (win_main) {
+            int h, w;
+            getmaxyx(win_main, h, w);
+            werase(win_main);
+            box(win_main, 0, 0);
+            std::string msg = "Terminal too small: " + std::to_string(w) + "x" + std::to_string(h);
+            std::string tip = "Please resize window to at least 50x12.";
+            mvwprintw(win_main, std::max(1, h / 2 - 1), std::max(1, (w - static_cast<int>(msg.length())) / 2), "%s", msg.c_str());
+            mvwprintw(win_main, std::max(1, h / 2), std::max(1, (w - static_cast<int>(tip.length())) / 2), "%s", tip.c_str());
+            wrefresh(win_main);
+        }
+        return;
+    }
+
     render_title();
     render_menu();
     render_main();
@@ -654,6 +725,11 @@ void TUI::execute_command(const std::string& cmd_str) {
 }
 
 void TUI::handle_input(int ch, bool& should_exit) {
+    if (ch == KEY_RESIZE) {
+        resize_all();
+        return;
+    }
+
     if (is_command_mode) {
         if (ch == 27) { // Escape cancels
             is_command_mode = false;
@@ -673,10 +749,6 @@ void TUI::handle_input(int ch, bool& should_exit) {
     }
 
     switch (ch) {
-        case KEY_RESIZE:
-            resize_all();
-            break;
-
         case KEY_UP:
             menu_selected_idx = (menu_selected_idx - 1 + 10) % 10;
             break;
@@ -778,14 +850,20 @@ void TUI::run() {
     bool should_exit = false;
 
     while (!should_exit) {
+        if (g_terminal_resized || is_term_resized(LINES, COLS)) {
+            g_terminal_resized = 0;
+            resize_all();
+        }
+
         render_all();
 
-        // If running continuously, non-blocking check with 20ms timeout
         if (is_running_continuous) {
             wtimeout(stdscr, 20);
             int ch = getch();
-            if (ch != ERR) {
-                // Any key pauses
+            if (ch == KEY_RESIZE || g_terminal_resized) {
+                g_terminal_resized = 0;
+                resize_all();
+            } else if (ch != ERR) {
                 is_running_continuous = false;
                 log_message("Continuous run stopped by user keypress.");
             } else {
@@ -805,9 +883,13 @@ void TUI::run() {
                 }
             }
         } else {
-            wtimeout(stdscr, -1);
+            // 50ms timeout ensures regular terminal geometry check even without keystrokes
+            wtimeout(stdscr, 50);
             int ch = getch();
-            if (ch != ERR) {
+            if (ch == KEY_RESIZE || g_terminal_resized) {
+                g_terminal_resized = 0;
+                resize_all();
+            } else if (ch != ERR) {
                 handle_input(ch, should_exit);
             }
         }
