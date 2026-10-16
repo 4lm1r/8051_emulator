@@ -1,0 +1,23 @@
+# Build artifacts
+build/
+bin/
+lib/
+*.o
+*.a
+*.so
+*.out
+
+# Compilation database & IDE files
+compile_commands.json
+.cache/
+.vscode/
+.idea/
+
+# Testing & temporary files
+test_rom.hex
+*.tmp
+*.log
+
+# OS metadata
+.DS_Store
+Thumbs.db
