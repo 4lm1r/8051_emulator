@@ -4,9 +4,6 @@
 #include <sstream>
 #include <iomanip>
 #include <algorithm>
-#include <signal.h>
-#include <sys/ioctl.h>
-#include <unistd.h>
 
 enum ColorPairs {
     PAIR_DEFAULT = 0,
@@ -20,11 +17,6 @@ enum ColorPairs {
     PAIR_ACCENT = 8,
     PAIR_NONZERO = 9
 };
-
-static volatile sig_atomic_t g_terminal_resized = 0;
-static void sigwinch_handler(int) {
-    g_terminal_resized = 1;
-}
 
 static std::string to_hex16(uint16_t val) {
     std::ostringstream ss;
@@ -52,8 +44,6 @@ TUI::TUI(CPU& c, Memory& m, Debugger& dbg, const std::string& loaded_file)
     keypad(stdscr, TRUE);
     curs_set(0);
 
-    signal(SIGWINCH, sigwinch_handler);
-
     init_colors();
     create_windows();
 
@@ -62,7 +52,6 @@ TUI::TUI(CPU& c, Memory& m, Debugger& dbg, const std::string& loaded_file)
 }
 
 TUI::~TUI() {
-    signal(SIGWINCH, SIG_DFL);
     destroy_windows();
     endwin();
 }
@@ -120,22 +109,18 @@ void TUI::destroy_windows() {
 }
 
 void TUI::resize_all() {
-    struct winsize ws;
-    if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == 0 && ws.ws_col > 0 && ws.ws_row > 0) {
-        resizeterm(ws.ws_row, ws.ws_col);
-    } else {
-        resizeterm(0, 0);
-    }
+    // 1. Tell curses to update internal window size structures to new geometry
+    resizeterm(LINES, COLS);
 
-    endwin();
-    refresh();
-    clear();
+    // 2. Clear stdscr to wipe old borders and text from the screen
+    wclear(stdscr);
+    wrefresh(stdscr);
 
+    // 3. Recreate windows with new dimensions
     destroy_windows();
     create_windows();
 
-    clear();
-    refresh();
+    // 4. Redraw everything cleanly
     render_all();
 }
 
@@ -849,23 +834,19 @@ void TUI::handle_input(int ch, bool& should_exit) {
 void TUI::run() {
     bool should_exit = false;
 
+    // Initial render
+    render_all();
+
     while (!should_exit) {
-        if (g_terminal_resized || is_term_resized(LINES, COLS)) {
-            g_terminal_resized = 0;
-            resize_all();
-        }
-
-        render_all();
-
         if (is_running_continuous) {
-            wtimeout(stdscr, 20);
+            wtimeout(stdscr, 25);
             int ch = getch();
-            if (ch == KEY_RESIZE || g_terminal_resized) {
-                g_terminal_resized = 0;
+            if (ch == KEY_RESIZE) {
                 resize_all();
             } else if (ch != ERR) {
                 is_running_continuous = false;
                 log_message("Continuous run stopped by user keypress.");
+                render_all();
             } else {
                 for (int i = 0; i < 150 && is_running_continuous; ++i) {
                     if (cpu.is_halted()) {
@@ -881,16 +862,19 @@ void TUI::run() {
                         break;
                     }
                 }
+                render_all();
             }
         } else {
-            // 50ms timeout ensures regular terminal geometry check even without keystrokes
-            wtimeout(stdscr, 50);
+            // Blocking wait: ncurses automatically wakes up on keypress OR terminal resize (KEY_RESIZE)
+            wtimeout(stdscr, -1);
             int ch = getch();
-            if (ch == KEY_RESIZE || g_terminal_resized) {
-                g_terminal_resized = 0;
+            if (ch == KEY_RESIZE) {
                 resize_all();
             } else if (ch != ERR) {
                 handle_input(ch, should_exit);
+                if (!should_exit) {
+                    render_all();
+                }
             }
         }
     }
